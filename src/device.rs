@@ -1,11 +1,56 @@
 use crate::{Result, UsbDirection};
-use crate::bus::{UsbBusAllocator, UsbBus, PollResult, StringIndex};
+use crate::bus::{UsbBusAllocator, UsbBus, PollResult};
 use crate::class::{UsbClass, ControlIn, ControlOut};
 use crate::control;
 use crate::control_pipe::ControlPipe;
-use crate::descriptor::{DescriptorWriter, descriptor_type, lang_id};
+use crate::descriptor::descriptor_type;
 use crate::endpoint::{EndpointType, EndpointAddress};
-pub use crate::device_builder::{UsbDeviceBuilder, UsbVidPid};
+use core::marker::PhantomData;
+
+
+/// A trait implemented by generated USB configuration.
+pub trait CustomStringDescriptorProvider<B: UsbBus> {
+    /// Writes out custom string descriptor
+    fn get_custom_string_descriptor(id: usize, xfer: ControlIn<B>) -> Result<()> {
+        let _ = id;
+        xfer.reject()
+    }
+}
+
+/// A trait implemented by generated USB configuration.
+pub trait DescriptorProvider<B: UsbBus>: CustomStringDescriptorProvider<B> {
+    /// Writes out device descriptor blob
+    fn get_device_descriptor(buffer: &mut [u8]) -> Result<usize>;
+
+    /// Writes out configuration descriptor blob
+    fn get_configuration_descriptor(buffer: &mut [u8]) -> Result<usize>;
+
+    /// Writes out string descriptor
+    ///
+    /// This function will reject transfer if requested string descriptor isn't defined
+    fn get_string_descriptor(lang_id: u16, index: u8, xfer: ControlIn<B>) -> Result<()>;
+
+    /// Returns endpoint 0 maximum packet size
+    fn get_ep0_max_packet_size() -> u8;
+
+    /// Writes requested descriptor
+    fn get_descriptor(xfer: ControlIn<B>) -> Result<()> {
+        let req = *xfer.request();
+
+        let (dtype, index) = req.descriptor_type_index();
+
+        match dtype {
+            descriptor_type::DEVICE => xfer.accept(|buf| {
+                Self::get_device_descriptor(buf)
+            }),
+            descriptor_type::CONFIGURATION => xfer.accept(|buf| {
+                Self::get_configuration_descriptor(buf)
+            }),
+            descriptor_type::STRING => Self::get_string_descriptor(req.index, index, xfer),
+            _ => xfer.reject(),
+        }
+    }
+}
 
 /// The global state of the USB device.
 ///
@@ -30,14 +75,14 @@ pub enum UsbDeviceState {
 const MAX_ENDPOINTS: usize = 16;
 
 /// A USB device consisting of one or more device classes.
-pub struct UsbDevice<'a, B: UsbBus> {
+pub struct UsbDevice<'a, B: UsbBus, P: DescriptorProvider<B>> {
     bus: &'a B,
-    config: Config<'a>,
     control: ControlPipe<'a, B>,
     device_state: UsbDeviceState,
     remote_wakeup_enabled: bool,
     self_powered: bool,
     pending_address: u8,
+    _provider: PhantomData<P>,
 }
 
 pub(crate) struct Config<'a> {
@@ -64,26 +109,25 @@ pub const DEFAULT_ALTERNATE_SETTING: u8 = 0;
 
 type ClassList<'a, B> = [&'a mut dyn UsbClass<B>];
 
-impl<B: UsbBus> UsbDevice<'_, B> {
-    pub(crate) fn build<'a>(alloc: &'a UsbBusAllocator<B>, config: Config<'a>)
-        -> UsbDevice<'a, B>
+impl<B: UsbBus, P: DescriptorProvider<B>> UsbDevice<'_, B, P> {
+    pub fn new<'a>(alloc: &'a UsbBusAllocator<B>) -> UsbDevice<'a, B, P>
     {
         let control_out = alloc.alloc(Some(0.into()), EndpointType::Control,
-            config.max_packet_size_0 as u16, 0).expect("failed to alloc control endpoint");
+            P::get_ep0_max_packet_size as u16, 0).expect("failed to alloc control endpoint");
 
         let control_in = alloc.alloc(Some(0.into()), EndpointType::Control,
-            config.max_packet_size_0 as u16, 0).expect("failed to alloc control endpoint");
+            P::get_ep0_max_packet_size as u16, 0).expect("failed to alloc control endpoint");
 
         let bus = alloc.freeze();
 
         UsbDevice {
             bus,
-            config,
             control: ControlPipe::new(control_out, control_in),
             device_state: UsbDeviceState::Default,
             remote_wakeup_enabled: false,
             self_powered: false,
             pending_address: 0,
+            _provider: PhantomData
         }
     }
 
@@ -273,8 +317,9 @@ impl<B: UsbBus> UsbDevice<'_, B> {
                     xfer.accept_with(&status.to_le_bytes()).ok();
                 },
 
-                (Recipient::Device, Request::GET_DESCRIPTOR)
-                    => UsbDevice::get_descriptor(&self.config, classes, xfer),
+                (Recipient::Device, Request::GET_DESCRIPTOR) => {
+                    P::get_descriptor(xfer).ok();
+                },
 
                 (Recipient::Device, Request::GET_CONFIGURATION) => {
                     xfer.accept_with(&CONFIGURATION_VALUE.to_le_bytes()).ok();
@@ -356,71 +401,6 @@ impl<B: UsbBus> UsbDevice<'_, B> {
 
         if let Some(ctrl) = ctrl {
             ctrl.reject().ok();
-        }
-    }
-
-    fn get_descriptor(config: &Config, classes: &mut ClassList<'_, B>, xfer: ControlIn<B>) {
-        let req = *xfer.request();
-
-        let (dtype, index) = req.descriptor_type_index();
-
-        fn accept_writer<B: UsbBus>(
-            xfer: ControlIn<B>,
-            f: impl FnOnce(&mut DescriptorWriter) -> Result<()>)
-        {
-            xfer.accept(|buf| {
-                let mut writer = DescriptorWriter::new(buf);
-                f(&mut writer)?;
-                Ok(writer.position())
-            }).ok();
-        }
-
-        match dtype {
-            descriptor_type::DEVICE => accept_writer(xfer, |w| w.device(config)),
-
-            descriptor_type::CONFIGURATION => accept_writer(xfer, |w| {
-                w.configuration(config)?;
-
-                for cls in classes {
-                    cls.get_configuration_descriptors(w)?;
-                    w.end_class();
-                }
-
-                w.end_configuration();
-
-                Ok(())
-            }),
-
-            descriptor_type::STRING => {
-                if index == 0 {
-                    accept_writer(xfer, |w|
-                        w.write(
-                            descriptor_type::STRING,
-                            &lang_id::ENGLISH_US.to_le_bytes()))
-                } else {
-                    let s = match index {
-                        1 => config.manufacturer,
-                        2 => config.product,
-                        3 => config.serial_number,
-                        _ => {
-                            let index = StringIndex::new(index);
-                            let lang_id = req.index;
-
-                            classes.iter()
-                                .filter_map(|cls| cls.get_string(index, lang_id))
-                                .nth(0)
-                        },
-                    };
-
-                    if let Some(s) = s {
-                        accept_writer(xfer, |w| w.string(s));
-                    } else {
-                        xfer.reject().ok();
-                    }
-                }
-            },
-
-            _ => { xfer.reject().ok(); },
         }
     }
 

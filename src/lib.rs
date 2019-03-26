@@ -166,19 +166,17 @@ pub mod device;
 /// Creating USB descriptors
 pub mod descriptor;
 
-/// Test USB class for testing USB driver implementations. Peripheral driver implementations should
-/// include an example called "test_class" that creates a device with this class to enable the
-/// driver to be tested with the test_class_host example in this crate.
-pub mod test_class;
+///// Test USB class for testing USB driver implementations. Peripheral driver implementations should
+///// include an example called "test_class" that creates a device with this class to enable the
+///// driver to be tested with the test_class_host example in this crate.
+//pub mod test_class;
 
 mod control_pipe;
-
-mod device_builder;
 
 /// Prelude for device implementors.
 pub mod prelude {
     pub use crate::UsbError;
-    pub use crate::device::{UsbDevice, UsbDeviceBuilder, UsbDeviceState, UsbVidPid};
+    pub use crate::device::{UsbDevice, UsbDeviceState};
 }
 
 /// Prelude for class implementors.
