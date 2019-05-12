@@ -280,18 +280,17 @@ impl<B: UsbBus, P: DescriptorProvider<B>> UsbDevice<'_, B, P> {
         use crate::control::{Request, Recipient};
 
         let req = *self.control.request();
-        let mut ctrl = Some(&mut self.control);
 
         for cls in classes.iter_mut() {
-            cls.control_in(ControlIn::new(&mut ctrl));
+            cls.control_in(ControlIn::new(&mut self.control));
 
-            if ctrl.is_none() {
+            if !self.control.waiting_for_response() {
                 return;
             }
         }
 
         if req.request_type == control::RequestType::Standard {
-            let xfer = ControlIn::new(&mut ctrl);
+            let xfer = ControlIn::new(&mut self.control);
 
             match (req.recipient, req.request) {
                 (Recipient::Device, Request::GET_STATUS) => {
@@ -334,8 +333,8 @@ impl<B: UsbBus, P: DescriptorProvider<B>> UsbDevice<'_, B, P> {
             };
         }
 
-        if let Some(ctrl) = ctrl {
-            ctrl.reject().ok();
+        if self.control.waiting_for_response() {
+            self.control.reject().ok();
         }
     }
 
@@ -343,18 +342,17 @@ impl<B: UsbBus, P: DescriptorProvider<B>> UsbDevice<'_, B, P> {
         use crate::control::{Request, Recipient};
 
         let req = *self.control.request();
-        let mut ctrl = Some(&mut self.control);
 
         for cls in classes {
-            cls.control_out(ControlOut::new(&mut ctrl));
+            cls.control_out(ControlOut::new(&mut self.control));
 
-            if ctrl.is_none() {
+            if !self.control.waiting_for_response() {
                 return;
             }
         }
 
         if req.request_type == control::RequestType::Standard {
-            let xfer = ControlOut::new(&mut ctrl);
+            let xfer = ControlOut::new(&mut self.control);
 
             const CONFIGURATION_VALUE_U16: u16 = CONFIGURATION_VALUE as u16;
             const DEFAULT_ALTERNATE_SETTING_U16: u16 = DEFAULT_ALTERNATE_SETTING as u16;
@@ -399,8 +397,8 @@ impl<B: UsbBus, P: DescriptorProvider<B>> UsbDevice<'_, B, P> {
             }
         }
 
-        if let Some(ctrl) = ctrl {
-            ctrl.reject().ok();
+        if self.control.waiting_for_response() {
+            self.control.reject().ok();
         }
     }
 
