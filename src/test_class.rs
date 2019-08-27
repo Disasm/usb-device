@@ -3,18 +3,19 @@
 use core::cmp;
 use crate::Result;
 use crate::class_prelude::*;
+use crate::endpoint::{Endpoint, EndpointOut, EndpointIn};
 use crate::device::{UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use crate::descriptor;
 
 /// Test USB class for testing USB driver implementations. Supports various endpoint types and
 /// requests for testing USB peripheral drivers on actual hardware.
-pub struct TestClass<'a, B: UsbBus> {
+pub struct TestClass<B: UsbBus> {
     custom_string: StringIndex,
     iface: InterfaceNumber,
-    ep_bulk_in: EndpointIn<'a, B>,
-    ep_bulk_out: EndpointOut<'a, B>,
-    ep_interrupt_in: EndpointIn<'a, B>,
-    ep_interrupt_out: EndpointOut<'a, B>,
+    ep_bulk_in: B::EndpointIn,
+    ep_bulk_out: B::EndpointOut,
+    ep_interrupt_in: B::EndpointIn,
+    ep_interrupt_out: B::EndpointOut,
     control_buf: [u8; 256],
     bulk_buf: [u8; 256],
     interrupt_buf: [u8; 256],
@@ -43,16 +44,16 @@ pub const REQ_UNKNOWN: u8 = 42;
 
 pub const LONG_DATA: &'static [u8] = &[0x17; 257];
 
-impl<B: UsbBus> TestClass<'_, B> {
+impl<B: UsbBus> TestClass<B> {
     /// Creates a new TestClass.
-    pub fn new(alloc: &UsbBusAllocator<B>) -> TestClass<'_, B> {
+    pub fn new(alloc: &mut UsbAllocator<B>) -> TestClass<B> {
         TestClass {
             custom_string: alloc.string(),
             iface: alloc.interface(),
-            ep_bulk_in: alloc.bulk(64),
-            ep_bulk_out: alloc.bulk(64),
-            ep_interrupt_in: alloc.interrupt(31, 1),
-            ep_interrupt_out: alloc.interrupt(31, 1),
+            ep_bulk_in: alloc.endpoint_in(EndpointConfig::bulk(64)),
+            ep_bulk_out: alloc.endpoint_out(EndpointConfig::bulk(64)),
+            ep_interrupt_in: alloc.endpoint_in(EndpointConfig::interrupt(31, 1)),
+            ep_interrupt_out: alloc.endpoint_out(EndpointConfig::interrupt(31, 1)),
             control_buf: [0; 256],
             bulk_buf: [0; 256],
             interrupt_buf: [0; 256],
@@ -67,8 +68,8 @@ impl<B: UsbBus> TestClass<'_, B> {
     }
 
     /// Convenience method to create a UsbDevice that is configured correctly for TestClass.
-    pub fn make_device<'a, 'b>(&'a self, usb_bus: &'b UsbBusAllocator<B>) -> UsbDevice<'b, B> {
-        UsbDeviceBuilder::new(&usb_bus, UsbVidPid(VID, PID))
+    pub fn make_device(&self, usb_bus: UsbAllocator<B>) -> UsbDevice<B> {
+        UsbDeviceBuilder::new(usb_bus, UsbVidPid(VID, PID))
             .manufacturer(MANUFACTURER)
             .product(PRODUCT)
             .serial_number(SERIAL_NUMBER)
@@ -132,18 +133,17 @@ impl<B: UsbBus> TestClass<'_, B> {
     }
 
     fn write_bulk_in(&mut self, write_empty: bool) {
-        let to_write = cmp::min(self.len - self.i, self.ep_bulk_in.max_packet_size() as usize);
+        let count = cmp::min(self.len - self.i, self.ep_bulk_in.max_packet_size() as usize);
 
-        if to_write == 0 && !write_empty {
+        if count == 0 && !write_empty {
             self.len = 0;
             self.i = 0;
 
             return;
         }
 
-        match self.ep_bulk_in.write(&self.bulk_buf[self.i..self.i+to_write]) {
-            Ok(count) => {
-                assert_eq!(count, to_write);
+        match self.ep_bulk_in.write(&self.bulk_buf[self.i..self.i+count]) {
+            Ok(()) => {
                 self.expect_bulk_in_complete = true;
                 self.i += count;
             },
@@ -153,7 +153,7 @@ impl<B: UsbBus> TestClass<'_, B> {
     }
 }
 
-impl<B: UsbBus> UsbClass<B> for TestClass<'_, B> {
+impl<B: UsbBus> UsbClass<B> for TestClass<B> {
     fn reset(&mut self) {
         self.len = 0;
         self.i = 0;
