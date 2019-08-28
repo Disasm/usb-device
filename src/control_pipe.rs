@@ -86,7 +86,7 @@ impl<B: UsbBus> ControlPipe<B> {
             },
         };
 
-        /*sprintln!("SETUP {:?} {:?} {:?} req:{} val:{} idx:{} len:{} {:?}",
+        /*crate::println!("SETUP {:?} {:?} {:?} req:{} val:{} idx:{} len:{} {:?}",
             req.direction, req.request_type, req.recipient,
             req.request, req.value, req.index, req.length,
             self.state);*/
